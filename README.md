@@ -463,3 +463,142 @@ GREEN CHECK: PASS
 - Continuous batching scaled 3.65x from concurrency 1 to 8, compared with 3.10x for static batching.
 - Continuous batching's advantage comes from reusing finished sequence slots instead of waiting for a static batch's longest request.
 - Ratios between complete scaling curves are more reliable than expecting per-level speedups to increase monotonically.
+
+# AIDC W3D4 — Quantise and Lock the Model
+
+This lab compares an AWQ-quantised model with the FP16 model served in W3D3, checks whether quantisation affects response quality and function calling, and locks the model configuration the team will operate for the rest of the course.
+
+The final decision is gated by function-calling reliability: a model must score at least 8/10 and avoid unnecessary tool calls on the distractor prompt.
+
+## Objective
+
+- Serve `Qwen/Qwen2.5-1.5B-Instruct-AWQ` with vLLM on a Tesla T4.
+- Measure AWQ GPU memory usage, KV-cache capacity, and generation speed.
+- Compare five qualitative responses between AWQ and FP16.
+- Run the official function-calling smoke test against both models.
+- Lock the candidate that satisfies the lab's smoke-test rule.
+- Export the locked configuration and smoke-test evidence.
+
+## Environment
+
+| Component | Value |
+| --- | --- |
+| Runtime | Google Colab past runtime 2026.07 |
+| Python | 3.12 |
+| GPU | Tesla T4, 15 GB |
+| Serving engine | vLLM `0.6.*` |
+| Transformers | `4.46.*` |
+| Accelerate | `1.1.*` |
+| AutoAWQ | `0.2.*` |
+| HTTPX | `0.27.*` |
+| OpenAI client | `1.54.*` |
+
+The course pins were installed unchanged. The past Colab runtime was used because the pinned vLLM 0.6 dependency set is compatible with Python 3.12.
+
+## AWQ server configuration
+
+The quantised model was launched with:
+
+```text
+--model Qwen/Qwen2.5-1.5B-Instruct-AWQ
+--dtype half
+--max-model-len 4096
+--gpu-memory-utilization 0.85
+--quantization awq
+--enable-auto-tool-choice
+--tool-call-parser hermes
+```
+
+The `hermes` parser is required for the Qwen2.5 family. It converts generated tool requests into structured OpenAI-compatible `tool_calls` rather than leaving them as ordinary prose.
+
+The server became healthy after approximately 168 seconds, and `/v1/models` confirmed that the served model was `Qwen/Qwen2.5-1.5B-Instruct-AWQ`.
+
+## Memory and capacity
+
+| Measurement | AWQ result |
+| --- | ---: |
+| GPU memory used | 11,723 MiB |
+| GPU KV-cache blocks | 22,955 |
+| CPU blocks | 9,362 |
+
+AWQ reduces the model's weight storage, but `nvidia-smi` still showed approximately 11.7 GB in use. This is expected because vLLM allocates memory up to the configured `0.85` utilization target and uses the space freed by smaller weights for additional KV-cache blocks.
+
+The benefit therefore appears as serving capacity rather than a proportionally lower `memory.used` value.
+
+## Throughput
+
+The AWQ server was measured through its OpenAI-compatible endpoint after a short warm-up:
+
+| Model | Observed throughput |
+| --- | ---: |
+| FP16 baseline from W3D3 | 56.5 tokens/s |
+| AWQ | 4.5 tokens/s |
+
+The measured AWQ request generated 128 tokens in 28.44 seconds. In this environment AWQ was approximately 12.6 times slower than the FP16 baseline.
+
+The vLLM startup log warned that AWQ quantisation was not fully optimized in this version. This experiment demonstrates that reducing weight precision does not guarantee higher throughput; performance also depends on the serving engine and its available kernels.
+
+## Five-prompt quality comparison
+
+Both models were tested using the same five prompts covering summarisation, tool selection, rewriting, rollback instructions, and a non-technical explanation of quantisation.
+
+FP16 was more coherent and complete overall. AWQ showed noticeable degradation on the tool-selection prompt by inventing questionable API URLs, and its quantisation explanation used an unhelpful analogy. Some responses from both models did not follow the requested sentence count, and the longer outputs could reach the 200-token limit.
+
+Recorded judgment:
+
+> FP16 was more coherent and complete overall. AWQ showed degradation on the tool-choice and quantisation prompts, but it passed the formal function-calling gate with valid tool behaviour and full distractor compliance.
+
+## Function-calling smoke test
+
+The official smoke test made 10 attempts across three prompt types:
+
+- Four two-tool requests.
+- Four single-tool requests.
+- Two distractor requests that must remain call-free.
+
+| Model | Score | Required calls valid | Distractor call-free | Passed |
+| --- | ---: | ---: | ---: | --- |
+| AWQ | 10/10 | 8/8 | 2/2 | Yes |
+| FP16 | 10/10 | 8/8 | 2/2 | Yes |
+
+Both models passed the formal gate. AWQ was locked because the lab specifies FP16 as the fallback when the AWQ candidate scores below 8/10; the AWQ candidate instead achieved 10/10 with full distractor compliance.
+
+## Locked model
+
+| Field | Locked value |
+| --- | --- |
+| Model | `Qwen/Qwen2.5-1.5B-Instruct-AWQ` |
+| Quantisation | AWQ |
+| Tool-call parser | `hermes` |
+| Smoke score | 10/10 |
+| Distractor compliance | 2/2 call-free |
+| Gate result | Passed |
+
+This configuration is recorded in `model-lock.md`, while `smoke_result.json` contains the machine-readable smoke-test evidence.
+
+## Verification
+
+The supplied verifier checked the smoke-test schema and gate, distractor compliance, and completion of the model-lock record.
+
+```text
+smoke score: 10/10, distractor clean: True
+model-lock.md: all fields filled
+GREEN CHECK: PASS
+```
+
+## Repository files
+
+| File | Purpose |
+| --- | --- |
+| `W3D4_Quantise_and_Lock_T4.ipynb` | Complete Colab experiment and outputs |
+| `model-lock.md` | Locked model, flags, smoke score, and quality decision |
+| `smoke_result.json` | Machine-readable evidence for the green check |
+| `README.md` | Combined W3D1–W3D4 documentation |
+
+## Key takeaways
+
+- Quantised weights do not necessarily make `nvidia-smi memory.used` much lower because vLLM can reinvest freed memory in KV-cache capacity.
+- Quantisation does not automatically improve speed; kernel support and engine optimization matter.
+- A short quality comparison can reveal degradation that a throughput benchmark cannot.
+- Tool-use restraint matters as much as tool-use obedience: a model that always calls tools is unsafe for real consumers.
+- Stable model and parser flags must be recorded because this locked configuration becomes an operational dependency for later course work.
