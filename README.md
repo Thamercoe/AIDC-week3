@@ -602,3 +602,127 @@ GREEN CHECK: PASS
 - A short quality comparison can reveal degradation that a throughput benchmark cannot.
 - Tool-use restraint matters as much as tool-use obedience: a model that always calls tools is unsafe for real consumers.
 - Stable model and parser flags must be recorded because this locked configuration becomes an operational dependency for later course work.
+
+# AIDC W3D5 — The Benchmark Harness
+
+This lab benchmarks the locked AWQ model under increasing concurrency, identifies the highest measured concurrency that satisfies a p95 latency objective, and converts that result into an operational capacity commitment. The extra lab then prices that capacity and calculates when additional replicas are required.
+
+## Objective
+
+- Run the supplied benchmark harness against the locked model.
+- Sweep concurrency levels 1, 2, 4, 8, and 16 with 20 requests per level.
+- Measure aggregate tokens per second, TTFT, end-to-end p95 latency, and errors.
+- Identify the knee under a 3-second p95 service-level objective.
+- Write a one-page capacity note.
+- Calculate cost per million output tokens and a scale-out plan.
+
+## Environment and locked configuration
+
+| Component | Value |
+| --- | --- |
+| GPU | Tesla T4, 15 GB |
+| Serving engine | vLLM `0.6.*` |
+| Locked model | `Qwen/Qwen2.5-1.5B-Instruct-AWQ` |
+| Quantisation | AWQ |
+| Maximum model length | 4096 tokens |
+| GPU memory utilization | 0.85 |
+| Tool-call parser | `hermes` |
+| Target p95 latency | 3.0 seconds |
+
+The benchmark used the instructor-provided `bench.py` harness and its fixed set of 20 prompts. The harness excluded a warm-up round and recorded every completed level in `bench_report.json`.
+
+## Benchmark results
+
+| Concurrency | Tokens/s | TTFT p50 | TTFT p95 | Latency p95 | Successful | Errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 78.92 | 0.0790 s | 0.1344 s | 1.6555 s | 20 | 0 |
+| 2 | 164.19 | 0.0510 s | 0.0877 s | 1.5471 s | 20 | 0 |
+| 4 | 248.33 | 0.0843 s | 0.1989 s | 2.4718 s | 20 | 0 |
+| 8 | 476.07 | 0.1403 s | 0.2019 s | 1.9572 s | 20 | 0 |
+| 16 | 679.42 | 0.2385 s | 0.2421 s | 2.4134 s | 20 | 0 |
+
+Throughput increased from 78.92 tokens/s at concurrency 1 to 679.42 tokens/s at concurrency 16. Every level completed successfully with zero errors, and all measured p95 latencies remained below the 3-second target.
+
+## Capacity knee
+
+| Capacity field | Result |
+| --- | --- |
+| Target p95 | 3.0 seconds |
+| Knee concurrency | 16, sweep-bounded |
+| Throughput at knee | 679.42 tokens/s |
+| p95 latency at knee | 2.4134 seconds |
+| Sustainable request rate | 6.54 requests/s |
+| Errors | 0 |
+
+The knee is described as **16, sweep-bounded** because concurrency 16 still met the latency target while throughput continued to rise. The experiment therefore demonstrated capacity of at least 16 concurrent requests but did not locate the true saturation point.
+
+The limiting family was recorded as memory-bound. From concurrency 8 to 16, concurrency doubled while throughput rose by only 43%, and p95 increased from 1.9572 to 2.4134 seconds. This diminishing scaling is consistent with decode approaching a memory-bandwidth ceiling.
+
+The knee is reported instead of an unconstrained throughput peak because operational capacity must satisfy the latency SLO. Throughput that violates the target cannot be promised as usable capacity.
+
+## Extra lab — Cost per million tokens
+
+The extra lab used a representative on-demand T4-class price of `$0.35` per GPU-hour.
+
+```text
+cost per million tokens = GPU hourly price / (tokens per second × 3600 / 1,000,000)
+```
+
+| Concurrency | Tokens/s | p95 latency | Cost per million tokens |
+| ---: | ---: | ---: | ---: |
+| 1 | 78.92 | 1.6555 s | $1.2319 |
+| 2 | 164.19 | 1.5471 s | $0.5921 |
+| 4 | 248.33 | 2.4718 s | $0.3915 |
+| 8 | 476.07 | 1.9572 s | $0.2042 |
+| 16 | 679.42 | 2.4134 s | $0.1431 |
+
+At the measured knee, the service costs approximately **$0.1431 per million output tokens**. Cost per token fell as concurrency increased because each GPU-hour produced more output tokens, while the measured p95 remained within the SLO.
+
+## Scale-out plan
+
+Each replica is kept at the same safe knee of 679.42 tokens/s and 2.4134-second p95 latency.
+
+| Required throughput | Replicas | Hourly cost | Effective p95 |
+| ---: | ---: | ---: | ---: |
+| 679.42 tokens/s | 1 | $0.35 | 2.4134 s |
+| 1,019.13 tokens/s | 2 | $0.70 | 2.4134 s |
+| 1,358.84 tokens/s | 2 | $0.70 | 2.4134 s |
+| 2,038.26 tokens/s | 3 | $1.05 | 2.4134 s |
+
+Because the sweep found no measured level beyond concurrency 16, higher single-GPU capacity cannot be treated as proven. Scaling out with additional replicas preserves the measured latency behavior instead of relying on unmeasured or SLO-violating capacity.
+
+## Verification
+
+The main benchmark verifier confirmed five concurrency levels, zero errors, and a completed capacity note:
+
+```text
+levels: 5, concurrencies: [1, 2, 4, 8, 16], total errors: 0
+capacity-note.md: all fields filled
+GREEN CHECK: PASS
+```
+
+The extra lab verifier independently recomputed every cost, the knee, and the complete scale-out plan:
+
+```text
+recomputed costs, knee and scale-out plan all agree
+GREEN CHECK: PASS
+```
+
+## Repository files
+
+| File | Purpose |
+| --- | --- |
+| `W3D5_Benchmark_Harness_T4.ipynb` | Benchmark, knee analysis, and extra cost calculations |
+| `bench_report.json` | Raw results for concurrency levels 1 through 16 |
+| `capacity-note.md` | One-page capacity commitment at the selected SLO |
+| `knee.json` | Machine-readable SLO and knee concurrency |
+| `cost_report.json` | Cost-per-token calculations and scale-out plan |
+| `README.md` | Combined W3D1–W3D5 documentation |
+
+## Key takeaways
+
+- Capacity is the highest measured load that still satisfies the latency SLO, not simply the largest throughput number.
+- Throughput and p95 must be read together because a cheaper cost per token may hide unacceptable latency.
+- The locked AWQ model sustained at least 16 concurrent requests and 679.42 tokens/s within a 3-second p95 target.
+- At the knee, output cost was approximately $0.1431 per million tokens at a $0.35 hourly GPU price.
+- Scaling out keeps each replica within its measured operating envelope and avoids counting unproven throughput as capacity.
